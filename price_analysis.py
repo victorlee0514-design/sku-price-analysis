@@ -243,11 +243,21 @@ st.dataframe(
 
 # ── SKU 明细 ─────────────────────────────────────────────────────────────────
 st.subheader("SKU 明细")
-show_only_below = st.checkbox("只显示低于基准线的 SKU", value=False)
-detail = view if not show_only_below else view[view["调整后毛利率"] < thr]
 
-display = detail[["SKU编码", "品类", "品牌", "采购成本", "核算价", "当前毛利率",
-                   "调整后核算价", "调整后毛利率", "单位利润变化"]].copy()
+col_filter, col_page = st.columns([2, 1])
+with col_filter:
+    show_only_below = st.checkbox("只显示低于基准线的 SKU", value=False)
+with col_page:
+    page_size = st.selectbox("每页显示", [50, 100, 200], index=1)
+
+detail = view if not show_only_below else view[view["调整后毛利率"] < thr]
+detail = detail[["SKU编码", "品类", "品牌", "采购成本", "核算价", "当前毛利率",
+                  "调整后核算价", "调整后毛利率", "单位利润变化"]].reset_index(drop=True)
+
+total_pages = max(1, (len(detail) - 1) // page_size + 1)
+page = st.number_input(f"页码（共 {total_pages} 页，{len(detail)} 条）",
+                       min_value=1, max_value=total_pages, value=1, step=1) - 1
+page_df = detail.iloc[page * page_size : (page + 1) * page_size].copy()
 
 fmt2 = {"采购成本": "{:.2f}", "核算价": "{:.2f}", "当前毛利率": "{:.1%}",
         "调整后核算价": "{:.2f}", "调整后毛利率": "{:.1%}", "单位利润变化": "{:+.2f}"}
@@ -258,11 +268,11 @@ def row_color(row):
     return [f"background-color: {bg}"] * len(row)
 
 st.dataframe(
-    display.style
+    page_df.style
     .apply(row_color, axis=1)
     .map(style_margin, subset=["当前毛利率", "调整后毛利率"])
     .format(fmt2),
-    use_container_width=True, height=480, hide_index=True
+    use_container_width=True, height=420, hide_index=True
 )
 
 # ── 导出 ─────────────────────────────────────────────────────────────────────
