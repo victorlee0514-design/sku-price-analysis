@@ -42,11 +42,13 @@ with st.sidebar:
 def load_raw(source):
     return pd.read_excel(source)
 
-def find_col(cols, keywords):
-    """按关键词找第一个匹配的列名，不区分大小写。"""
+def find_col(cols, keywords, exclude=None):
+    """按关键词优先级匹配列名（不区分大小写），可排除含特定词的列。"""
+    exclude = exclude or []
     for kw in keywords:
         for c in cols:
-            if kw.lower() in str(c).lower():
+            c_lower = str(c).lower()
+            if kw.lower() in c_lower and not any(ex.lower() in c_lower for ex in exclude):
                 return c
     return None
 
@@ -59,12 +61,16 @@ else:
 cols = list(raw_df.columns)
 
 # ── 自动识别列 ────────────────────────────────────────────────────────────────
+# 成本侧：总部从供应商的进货价，优先匹配「加权平均」，排除含「核算价」的列
+# 价格侧：总部对外的结算/核算价，含「采购核算价」也归此侧
 auto = {
-    "SKU编码": find_col(cols, ["sku编码","sku","康众编码","商品编码","库内编码","货号"]),
-    "品牌":    find_col(cols, ["品牌"]),
-    "品类":    find_col(cols, ["品类","产品分类","一级分类","商品目录","粗称","分类"]),
-    "采购成本": find_col(cols, ["采购成本","成本","进价","采购价格","加权"]),
-    "核算价":  find_col(cols, ["核算价","售价","核算","销售价","零售价","采购核算"]),
+    "SKU编码":  find_col(cols, ["sku编码","sku","康众编码","商品编码","库内编码","货号"]),
+    "品牌":     find_col(cols, ["品牌"]),
+    "品类":     find_col(cols, ["品类","产品分类","一级分类","商品目录","粗称","分类"]),
+    "采购成本": find_col(cols, ["加权平均","加权成本","进货价","供应商价","采购成本"],
+                         exclude=["核算价","金额"]),
+    "核算价":   find_col(cols, ["核算价","采购核算","结算价","售价","零售价","销售价"],
+                         exclude=["金额"]),
 }
 
 # ── 若有未识别列，展示手动选列 UI ─────────────────────────────────────────────
@@ -95,6 +101,23 @@ for col in ["SKU编码", "品牌", "品类"]:
 
 raw["采购成本"] = pd.to_numeric(raw["采购成本"], errors="coerce")
 raw["核算价"]   = pd.to_numeric(raw["核算价"],   errors="coerce")
+
+# ── 数据质量校验 ───────────────────────────────────────────────────────────────
+valid = raw[raw["采购成本"].notna() & raw["核算价"].notna() &
+            (raw["采购成本"] > 0) & (raw["核算价"] > 0)]
+if len(valid) > 0:
+    cost_mean  = valid["采购成本"].mean()
+    price_mean = valid["核算价"].mean()
+    if abs(cost_mean - price_mean) / max(price_mean, 1) < 0.02:
+        st.warning(
+            "⚠️ **检测到成本列与核算价列数值几乎相等（差异 < 2%）**\n\n"
+            "当前识别：\n"
+            f"- 成本列 → `{auto['采购成本']}`（均值 {cost_mean:.2f}）\n"
+            f"- 核算价列 → `{auto['核算价']}`（均值 {price_mean:.2f}）\n\n"
+            "**可能原因**：此文件记录的是门店采购明细，「采购核算价」是门店从总部的拿货价，"
+            "并非总部从供应商的进货成本。毛利率分析需要包含「加权平均采购成本」的 SKU 价格导出文件。"
+        )
+        st.stop()
 
 df = raw[raw["采购成本"].notna() & raw["核算价"].notna()].copy()
 df = df[(df["采购成本"] > 0) & (df["核算价"] > 0)].reset_index(drop=True)
