@@ -326,7 +326,7 @@ fmt2 = {"采购成本": "{:.2f}", "核算价": "{:.2f}", "当前毛利率": "{:.
 def row_color(row):
     m = row["调整后毛利率"]
     bg = "#fff0f0" if m < 0.08 else ("#fffbea" if m < thr else "#f0fff4")
-    return [f"background-color: {bg}"] * len(row)
+    return [f"background-color: {bg}; color: #1a1a1a"] * len(row)
 
 st.dataframe(
     page_df.style
