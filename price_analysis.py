@@ -39,33 +39,62 @@ with st.sidebar:
     uploaded = st.file_uploader("上传 SKU 价格导出文件（.xlsx）", type=["xlsx"])
 
 @st.cache_data
-def load_data(source):
-    df = pd.read_excel(source)
-    cols = list(df.columns)
-    if len(cols) < 11:
-        raise ValueError(f"列数不足：该文件只有 {len(cols)} 列，需要至少 11 列的 SKU 价格导出格式。")
-    renamed = df.rename(columns={
-        cols[1]:  "SKU编码",
-        cols[4]:  "品类",
-        cols[5]:  "粗称",
-        cols[6]:  "品牌",
-        cols[9]:  "采购成本",
-        cols[10]: "核算价",
-    })[["SKU编码", "品类", "粗称", "品牌", "采购成本", "核算价"]]
-    renamed["采购成本"] = pd.to_numeric(renamed["采购成本"], errors="coerce")
-    renamed["核算价"]   = pd.to_numeric(renamed["核算价"],   errors="coerce")
-    return renamed
+def load_raw(source):
+    return pd.read_excel(source)
+
+def find_col(cols, keywords):
+    """按关键词找第一个匹配的列名，不区分大小写。"""
+    for kw in keywords:
+        for c in cols:
+            if kw.lower() in str(c).lower():
+                return c
+    return None
 
 if uploaded:
-    try:
-        raw = load_data(uploaded)
-    except Exception as e:
-        st.error(f"❌ 文件格式不兼容：{e}")
-        st.info("请上传系统导出的「SKU价格导出」标准格式文件，法雷奥/菲罗多销售报表等其他格式暂不支持。")
-        st.stop()
+    raw_df = load_raw(uploaded)
 else:
-    st.info("👈 请在左侧上传 SKU 价格导出文件（.xlsx）开始分析")
+    st.info("👈 请在左侧上传 Excel 文件（支持 SKU 价格导出、采购明细等格式）")
     st.stop()
+
+cols = list(raw_df.columns)
+
+# ── 自动识别列 ────────────────────────────────────────────────────────────────
+auto = {
+    "SKU编码": find_col(cols, ["sku编码","sku","康众编码","商品编码","库内编码","货号"]),
+    "品牌":    find_col(cols, ["品牌"]),
+    "品类":    find_col(cols, ["品类","产品分类","一级分类","商品目录","粗称","分类"]),
+    "采购成本": find_col(cols, ["采购成本","成本","进价","采购价格","加权"]),
+    "核算价":  find_col(cols, ["核算价","售价","核算","销售价","零售价","采购核算"]),
+}
+
+# ── 若有未识别列，展示手动选列 UI ─────────────────────────────────────────────
+missing = [k for k, v in auto.items() if v is None]
+if missing:
+    with st.expander("⚙️ 自动识别列失败，请手动选择（点击展开）", expanded=True):
+        st.caption(f"未能自动识别以下字段：{', '.join(missing)}。请从下拉框中选择对应列。")
+        col_opts = ["（跳过）"] + cols
+        for field in missing:
+            auto[field] = st.selectbox(f"{field} 对应哪一列？", col_opts,
+                                       key=f"sel_{field}")
+            if auto[field] == "（跳过）":
+                auto[field] = None
+
+# 成本和核算价必须有，否则无法分析
+if not auto["采购成本"] or not auto["核算价"]:
+    st.warning("至少需要指定「采购成本」和「核算价」两列才能开始分析。")
+    st.stop()
+
+# ── 构建工作数据框 ─────────────────────────────────────────────────────────────
+keep = {v: k for k, v in auto.items() if v}
+raw = raw_df[list(keep.keys())].rename(columns=keep).copy()
+
+# 补齐可选列
+for col in ["SKU编码", "品牌", "品类"]:
+    if col not in raw.columns:
+        raw[col] = "—"
+
+raw["采购成本"] = pd.to_numeric(raw["采购成本"], errors="coerce")
+raw["核算价"]   = pd.to_numeric(raw["核算价"],   errors="coerce")
 
 df = raw[raw["采购成本"].notna() & raw["核算价"].notna()].copy()
 df = df[(df["采购成本"] > 0) & (df["核算价"] > 0)].reset_index(drop=True)
