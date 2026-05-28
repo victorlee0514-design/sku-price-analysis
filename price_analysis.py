@@ -42,6 +42,8 @@ with st.sidebar:
 def load_data(source):
     df = pd.read_excel(source)
     cols = list(df.columns)
+    if len(cols) < 11:
+        raise ValueError(f"列数不足：该文件只有 {len(cols)} 列，需要至少 11 列的 SKU 价格导出格式。")
     renamed = df.rename(columns={
         cols[1]:  "SKU编码",
         cols[4]:  "品类",
@@ -50,10 +52,17 @@ def load_data(source):
         cols[9]:  "采购成本",
         cols[10]: "核算价",
     })[["SKU编码", "品类", "粗称", "品牌", "采购成本", "核算价"]]
+    renamed["采购成本"] = pd.to_numeric(renamed["采购成本"], errors="coerce")
+    renamed["核算价"]   = pd.to_numeric(renamed["核算价"],   errors="coerce")
     return renamed
 
 if uploaded:
-    raw = load_data(uploaded)
+    try:
+        raw = load_data(uploaded)
+    except Exception as e:
+        st.error(f"❌ 文件格式不兼容：{e}")
+        st.info("请上传系统导出的「SKU价格导出」标准格式文件，法雷奥/菲罗多销售报表等其他格式暂不支持。")
+        st.stop()
 else:
     st.info("👈 请在左侧上传 SKU 价格导出文件（.xlsx）开始分析")
     st.stop()
