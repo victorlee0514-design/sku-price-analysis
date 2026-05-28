@@ -1,0 +1,11 @@
+*.xlsx
+*.xls
+*.csv
+*.pyc
+__pycache__/
+.env
+brembo_*.xlsx
+brembo_*.py
+copy_file.py
+read_excel.py
+update_brembo.py
