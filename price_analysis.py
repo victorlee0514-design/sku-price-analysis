@@ -112,7 +112,7 @@ cols = list(raw_df.columns)
 auto = {
     "SKU编码":  find_col(cols, ["sku编码","sku","康众编码","商品编码","库内编码","货号"]),
     "品牌":     find_col(cols, ["品牌"]),
-    "品类":     find_col(cols, ["品类","产品分类","一级分类","商品目录","粗称","分类"]),
+    "品类":     find_col(cols, ["品类","产品分类","一级分类","商品目录","粗称","分类","类目名称","类目"]),
     "采购成本": find_col(cols, ["加权平均","加权成本","进货价","供应商价","采购成本"],
                          exclude=["核算价","金额"]),
     "核算价":   find_col(cols, ["核算价","采购核算","结算价","售价","零售价","销售价"],
@@ -346,6 +346,95 @@ st.dataframe(
     use_container_width=True, hide_index=True
 )
 
+# ── 品牌分析面板 ──────────────────────────────────────────────────────────────
+st.subheader("品牌分析")
+
+brand_sum = (
+    view.groupby("品牌")
+    .agg(
+        SKU数=("SKU编码", "count"),
+        当前均值毛利率=("当前毛利率", "mean"),
+        调整后均值毛利率=("调整后毛利率", "mean"),
+        风险SKU数=("调整后毛利率", lambda x: (x < thr).sum()),
+        危险SKU数=("调整后毛利率", lambda x: (x < 0.08).sum()),
+    )
+    .reset_index()
+    .sort_values("调整后均值毛利率", ascending=True)
+)
+brand_sum["风险占比%"] = (brand_sum["风险SKU数"] / brand_sum["SKU数"] * 100).round(1)
+
+n_brands = brand_sum["品牌"].nunique()
+n_cats   = view["品类"].nunique()
+ba1, ba2 = st.columns([1, 1.5]) if (n_brands > 1 and n_cats > 1) else st.columns(2)
+
+with ba1:
+    st.markdown("#### 各品牌均值毛利率")
+    bar_colors = [
+        "#e74c3c" if m < 0.08 else ("#f39c12" if m < thr else "#2ecc71")
+        for m in brand_sum["调整后均值毛利率"]
+    ]
+    brand_bar = go.Figure(go.Bar(
+        y=brand_sum["品牌"],
+        x=brand_sum["调整后均值毛利率"] * 100,
+        orientation="h",
+        marker_color=bar_colors,
+        text=[f"{m:.1%}" for m in brand_sum["调整后均值毛利率"]],
+        textposition="outside",
+        hovertemplate="%{y}<br>均值毛利率 %{x:.1f}%<extra></extra>",
+    ))
+    brand_bar.add_vline(x=threshold, line_dash="dash", line_color="#e74c3c",
+                        line_width=1.5,
+                        annotation_text=f"基准线 {threshold}%",
+                        annotation_position="top right",
+                        annotation_font_color="#e74c3c")
+    brand_bar.update_layout(
+        margin=dict(t=10, b=30, l=10, r=70),
+        height=max(200, len(brand_sum) * 44),
+        xaxis_title="均值毛利率（%）",
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(brand_bar, use_container_width=True, config={"displayModeBar": False})
+
+with ba2:
+    if n_brands >= 2 and n_cats >= 2:
+        st.markdown("#### 品牌 × 品类 毛利率热力图")
+        pivot = (
+            view.groupby(["品类", "品牌"])["调整后毛利率"]
+            .mean()
+            .unstack(fill_value=np.nan)
+        )
+        z_vals   = pivot.values * 100
+        txt_vals = [[f"{v:.1f}%" if not np.isnan(v) else "—" for v in row]
+                    for row in z_vals]
+        hm = go.Figure(go.Heatmap(
+            z=z_vals,
+            x=list(pivot.columns),
+            y=list(pivot.index),
+            colorscale="RdYlGn",
+            zmin=0, zmax=30,
+            text=txt_vals,
+            texttemplate="%{text}",
+            hovertemplate="品类：%{y}<br>品牌：%{x}<br>均值毛利率：%{z:.1f}%<extra></extra>",
+            colorbar=dict(title="毛利率%"),
+        ))
+        hm.update_layout(
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=max(260, len(pivot.index) * 32 + 80),
+            xaxis=dict(tickangle=-20, side="top"),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(hm, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info(f"当前视图含 {n_brands} 个品牌 / {n_cats} 个品类，需至少各 2 个才能生成热力图。")
+
+fmt_b = {"当前均值毛利率": "{:.1%}", "调整后均值毛利率": "{:.1%}", "风险占比%": "{:.1f}%"}
+st.dataframe(
+    brand_sum.style.map(style_margin, subset=["当前均值毛利率", "调整后均值毛利率"]).format(fmt_b),
+    use_container_width=True, hide_index=True
+)
+
+st.divider()
+
 # ── SKU 明细（含功能3异常标记 + 功能4最低达标价格）────────────────────────────
 st.subheader("SKU 明细")
 
@@ -394,6 +483,57 @@ st.dataframe(
     .format(fmt2),
     use_container_width=True, height=420, hide_index=True
 )
+
+# ── 调价建议清单 ──────────────────────────────────────────────────────────────
+st.subheader("调价建议清单")
+
+below_thr = view2[view2["调整后毛利率"] < thr].copy()
+
+if len(below_thr) == 0:
+    st.success(f"✅ 当前筛选范围内所有 SKU 均已达到 {threshold}% 毛利基准，无需调价。")
+else:
+    n_danger = int((below_thr["调整后毛利率"] < 0.08).sum())
+    st.caption(
+        f"共 **{len(below_thr)}** 个 SKU 低于 {threshold}% 基准线"
+        f"（其中 **{n_danger}** 个危险级 <8%）。按紧迫程度排序，红色行优先处理。"
+    )
+    below_thr = below_thr.sort_values("调整后毛利率", ascending=True)
+    below_thr["建议核算价"]   = below_thr["最低达标价格"]
+    below_thr["建议调价幅度"] = (
+        (below_thr["建议核算价"] - below_thr["核算价"]) / below_thr["核算价"]
+    )
+    below_thr["调价建议"] = below_thr.apply(
+        lambda r: f"¥{r['核算价']:.2f} → ¥{r['建议核算价']:.2f}（{r['建议调价幅度']*100:+.1f}%）",
+        axis=1,
+    )
+    suggest_df = below_thr[["SKU编码", "品牌", "品类", "采购成本", "核算价",
+                             "当前毛利率", "建议核算价", "建议调价幅度", "调价建议", "异常"]
+                           ].reset_index(drop=True)
+
+    fmt_sug = {
+        "采购成本": "{:.2f}", "核算价": "{:.2f}",
+        "当前毛利率": "{:.1%}", "建议核算价": "{:.2f}", "建议调价幅度": "{:+.1%}",
+    }
+
+    def urgent_row(row):
+        bg = "#fff0f0" if row["当前毛利率"] < 0.08 else "#fffbea"
+        return [f"background-color:{bg};color:#1a1a1a"] * len(row)
+
+    st.dataframe(
+        suggest_df.style.apply(urgent_row, axis=1)
+        .map(style_margin, subset=["当前毛利率"])
+        .format(fmt_sug),
+        use_container_width=True, height=380, hide_index=True
+    )
+    csv_bytes = suggest_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "📋 下载调价建议清单（CSV）",
+        data=csv_bytes,
+        file_name=f"调价建议_{threshold}pct基准线.csv",
+        mime="text/csv",
+    )
+
+st.divider()
 
 # ── 功能5：带颜色的 Excel 导出 ────────────────────────────────────────────────
 st.divider()
