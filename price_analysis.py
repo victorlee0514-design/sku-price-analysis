@@ -168,13 +168,28 @@ with st.sidebar:
     sel_cat   = st.selectbox("品类", cats)
     st.divider()
     st.header("调价参数")
-    adj_pct   = st.slider("调价幅度（%）", -30, 30, 0, 1, help="正数=涨价，负数=降价")
     threshold = st.slider("毛利率基准线（%）", 5, 25, 10, 1)
     only_above_thr = st.checkbox(
         "仅调整高于基准线的 SKU",
         value=True,
         help="勾选后：当前毛利率 ≤ 基准线的 SKU 不参与调价，核算价维持不变",
     )
+    use_tiered = st.checkbox(
+        "启用分层调价",
+        value=False,
+        help="按当前毛利率高低分三档，分别设置不同调价幅度",
+    )
+    if use_tiered and only_above_thr:
+        tier_high_floor = st.slider("高毛利层起点（%）", 15, 30, 20, 1,
+                                    help="高于此值为高毛利层，基准线到此值之间为中毛利层")
+        tier_high_adj = st.slider(
+            f"高毛利层（≥{tier_high_floor}%）调价幅度（%）", -15, 5, -6, 1)
+        tier_mid_adj  = st.slider(
+            f"中毛利层（{threshold}%~{tier_high_floor}%）调价幅度（%）", -10, 5, -3, 1)
+        adj_pct = 0
+    else:
+        adj_pct = st.slider("调价幅度（%）", -30, 30, 0, 1, help="正数=涨价，负数=降价")
+        tier_high_floor, tier_high_adj, tier_mid_adj = 20, 0, 0
 
 # ── 筛选 + 计算 ───────────────────────────────────────────────────────────────
 view = df.copy()
@@ -184,7 +199,20 @@ if sel_cat != "全部":
     view = view[view["品类"] == sel_cat]
 view = view.copy()
 thr = threshold / 100
-if only_above_thr:
+high_floor = tier_high_floor / 100
+if only_above_thr and use_tiered:
+    view["调整后核算价"] = np.select(
+        [
+            view["当前毛利率"] >= high_floor,
+            (view["当前毛利率"] > thr) & (view["当前毛利率"] < high_floor),
+        ],
+        [
+            view["核算价"] * (1 + tier_high_adj / 100),
+            view["核算价"] * (1 + tier_mid_adj  / 100),
+        ],
+        default=view["核算价"],
+    )
+elif only_above_thr:
     view["调整后核算价"] = np.where(
         view["当前毛利率"] > thr,
         view["核算价"] * (1 + adj_pct / 100),
@@ -221,21 +249,31 @@ delta_sign  = "减少" if delta_below < 0 else ("增加" if delta_below > 0 else
 delta_abs   = abs(delta_below)
 pp_change   = (avg_after - avg_before) * 100
 
-filter_note = (
-    f"，其中 **{n_excluded}** 个低于基准线的 SKU 已排除调价（筛选规则：仅调整高于 {threshold}% 的 SKU）"
-    if only_above_thr and n_excluded > 0 else ""
-)
-if adj_pct == 0:
+if use_tiered and only_above_thr:
+    n_high_tier = int((view["当前毛利率"] >= high_floor).sum())
+    n_mid_tier  = int(((view["当前毛利率"] > thr) & (view["当前毛利率"] < high_floor)).sum())
     summary_text = (
-        f"当前未调价。共 **{n_total:,}** 个 SKU，其中 **{n_below0}** 个低于基准线 {threshold}%，"
-        f"均值毛利率 **{avg_before:.1%}**。拖动左侧滑块模拟调价效果。"
+        f"**分层调价** · 高毛利层（≥{tier_high_floor}%）**{n_high_tier}** 个 SKU 调 **{tier_high_adj:+d}%**，"
+        f"中毛利层（{threshold}%~{tier_high_floor}%）**{n_mid_tier}** 个 SKU 调 **{tier_mid_adj:+d}%**，"
+        f"基准线以下 **{n_excluded}** 个 SKU 不动。"
+        f"均值毛利率 **{avg_before:.1%}** → **{avg_after:.1%}**（{pp_change:+.1f}pp）。"
     )
 else:
-    summary_text = (
-        f"调价 **{adj_pct:+d}%** 后，低于基准线的 SKU 从 **{n_below0}** 个{delta_sign}至 **{n_below}** 个"
-        f"（{delta_sign} {delta_abs} 个），均值毛利率从 **{avg_before:.1%}** → **{avg_after:.1%}**"
-        f"（{pp_change:+.1f}pp）。**{best_cat}** 品类改善最显著（{best_pp:+.1f}pp）{filter_note}。"
+    filter_note = (
+        f"，其中 **{n_excluded}** 个低于基准线的 SKU 已排除调价（筛选规则：仅调整高于 {threshold}% 的 SKU）"
+        if only_above_thr and n_excluded > 0 else ""
     )
+    if adj_pct == 0:
+        summary_text = (
+            f"当前未调价。共 **{n_total:,}** 个 SKU，其中 **{n_below0}** 个低于基准线 {threshold}%，"
+            f"均值毛利率 **{avg_before:.1%}**。拖动左侧滑块模拟调价效果。"
+        )
+    else:
+        summary_text = (
+            f"调价 **{adj_pct:+d}%** 后，低于基准线的 SKU 从 **{n_below0}** 个{delta_sign}至 **{n_below}** 个"
+            f"（{delta_sign} {delta_abs} 个），均值毛利率从 **{avg_before:.1%}** → **{avg_after:.1%}**"
+            f"（{pp_change:+.1f}pp）。**{best_cat}** 品类改善最显著（{best_pp:+.1f}pp）{filter_note}。"
+        )
 
 st.info(f"📊 **调价影响摘要** · {summary_text}")
 
@@ -310,36 +348,36 @@ with v3:
 
 st.divider()
 
-# ── 功能2：多幅度并排对比表 ───────────────────────────────────────────────────
-st.subheader("多幅度调价对比")
-scenarios = [-10, -5, 0, 5, 10]
-scenario_rows = []
-for s in scenarios:
-    adj_price = view["核算价"] * (1 + s / 100)
-    if only_above_thr:
-        adj_price = np.where(view["当前毛利率"] > thr, adj_price, view["核算价"])
-    adj_margin = (adj_price - view["采购成本"]) / adj_price
-    scenario_rows.append({
-        "调价幅度": f"{s:+d}%",
-        "均值毛利率":       adj_margin.mean(),
-        f"低于{threshold}%的SKU数": int((adj_margin < thr).sum()),
-        "危险SKU数(<8%)":   int((adj_margin < 0.08).sum()),
-        "健康SKU数":        int((adj_margin >= thr).sum()),
-    })
-scenario_df = pd.DataFrame(scenario_rows)
+# ── 功能2：多幅度并排对比表（分层模式下隐藏）───────────────────────────────────
+if not (use_tiered and only_above_thr):
+    st.subheader("多幅度调价对比")
+    scenarios = [-10, -5, 0, 5, 10]
+    scenario_rows = []
+    for s in scenarios:
+        adj_price = view["核算价"] * (1 + s / 100)
+        if only_above_thr:
+            adj_price = np.where(view["当前毛利率"] > thr, adj_price, view["核算价"])
+        adj_margin = (adj_price - view["采购成本"]) / adj_price
+        scenario_rows.append({
+            "调价幅度": f"{s:+d}%",
+            "均值毛利率":            adj_margin.mean(),
+            f"低于{threshold}%的SKU数": int((adj_margin < thr).sum()),
+            "危险SKU数(<8%)":        int((adj_margin < 0.08).sum()),
+            "健康SKU数":             int((adj_margin >= thr).sum()),
+        })
+    scenario_df = pd.DataFrame(scenario_rows)
 
-def highlight_scenario(row):
-    if row["调价幅度"] == f"{adj_pct:+d}%":
-        return ["background-color: #1a4a2e; color: #fff; font-weight:bold"] * len(row)
-    return [""] * len(row)
+    def highlight_scenario(row):
+        if row["调价幅度"] == f"{adj_pct:+d}%":
+            return ["background-color: #1a4a2e; color: #fff; font-weight:bold"] * len(row)
+        return [""] * len(row)
 
-fmt_s = {"均值毛利率": "{:.1%}"}
-st.dataframe(
-    scenario_df.style.apply(highlight_scenario, axis=1).format(fmt_s),
-    use_container_width=True, hide_index=True
-)
-
-st.divider()
+    fmt_s = {"均值毛利率": "{:.1%}"}
+    st.dataframe(
+        scenario_df.style.apply(highlight_scenario, axis=1).format(fmt_s),
+        use_container_width=True, hide_index=True
+    )
+    st.divider()
 
 # ── 品类汇总表 ────────────────────────────────────────────────────────────────
 st.subheader("品类汇总")
@@ -508,32 +546,55 @@ st.dataframe(
 st.subheader("调价建议清单")
 
 if only_above_thr:
-    # 筛选规则开启：呈现对高于基准线 SKU 做出的调整
     above_df = view2[view2["当前毛利率"] > thr].copy()
+
+    is_no_adj = (
+        (tier_high_adj == 0 and tier_mid_adj == 0) if use_tiered else (adj_pct == 0)
+    )
 
     if len(above_df) == 0:
         st.warning(f"当前筛选范围内无毛利率高于 {threshold}% 的 SKU。")
-    elif adj_pct == 0:
+    elif is_no_adj:
         st.info(
-            f"筛选规则已开启：仅对高于基准线（{threshold}%）的 SKU 调价。"
-            f"当前共 **{len(above_df)}** 个 SKU 符合条件，均值毛利率 **{above_df['当前毛利率'].mean():.1%}**。"
-            f"调整左侧「调价幅度」滑块查看调价方案。"
+            f"{'分层调价模式已开启。' if use_tiered else ''}"
+            f"仅对高于基准线（{threshold}%）的 SKU 调价，当前共 **{len(above_df)}** 个符合条件，"
+            f"均值毛利率 **{above_df['当前毛利率'].mean():.1%}**。调整左侧参数查看方案。"
         )
     else:
-        n_still_above = int((above_df["调整后毛利率"] >= thr).sum())
-        n_drop_below  = int((above_df["调整后毛利率"] < thr).sum())
-        st.caption(
-            f"共 **{len(above_df)}** 个毛利率高于基准线（{threshold}%）的 SKU 参与此次 **{adj_pct:+d}%** 调价。"
-            f"调价后仍高于基准线：**{n_still_above}** 个；跌破基准线：**{n_drop_below}** 个（需关注）。"
+        if use_tiered:
+            n_high_show = int((above_df["当前毛利率"] >= high_floor).sum())
+            n_mid_show  = int((above_df["当前毛利率"] < high_floor).sum())
+            st.caption(
+                f"**分层调价**：高毛利层（≥{tier_high_floor}%）**{n_high_show}** 个 SKU 调 **{tier_high_adj:+d}%**；"
+                f"中毛利层（{threshold}%~{tier_high_floor}%）**{n_mid_show}** 个 SKU 调 **{tier_mid_adj:+d}%**。"
+            )
+            above_df["调价层级"] = np.where(
+                above_df["当前毛利率"] >= high_floor,
+                f"高毛利层（≥{tier_high_floor}%）",
+                f"中毛利层（{threshold}%~{tier_high_floor}%）",
+            )
+        else:
+            n_still_above = int((above_df["调整后毛利率"] >= thr).sum())
+            n_drop_below  = int((above_df["调整后毛利率"] < thr).sum())
+            st.caption(
+                f"共 **{len(above_df)}** 个高于基准线的 SKU 参与此次 **{adj_pct:+d}%** 调价。"
+                f"调后仍高于基准线：**{n_still_above}** 个；跌破基准线：**{n_drop_below}** 个（需关注）。"
+            )
+
+        above_df["实际调幅%"] = (
+            (above_df["调整后核算价"] - above_df["核算价"]) / above_df["核算价"] * 100
         )
         above_df["调价建议"] = above_df.apply(
-            lambda r: f"¥{r['核算价']:.2f} → ¥{r['调整后核算价']:.2f}（{adj_pct:+d}%）",
+            lambda r: f"¥{r['核算价']:.2f} → ¥{r['调整后核算价']:.2f}（{r['实际调幅%']:+.1f}%）",
             axis=1,
         )
         above_df = above_df.sort_values("调整后毛利率", ascending=True)
-        suggest_df = above_df[["SKU编码", "品牌", "品类", "采购成本", "核算价",
-                                "当前毛利率", "调整后核算价", "调整后毛利率", "调价建议", "异常"]
-                              ].reset_index(drop=True)
+
+        base_cols = ["SKU编码", "品牌", "品类", "采购成本", "核算价",
+                     "当前毛利率", "调整后核算价", "调整后毛利率", "调价建议", "异常"]
+        if use_tiered:
+            base_cols.insert(3, "调价层级")
+        suggest_df = above_df[base_cols].reset_index(drop=True)
 
         fmt_sug = {
             "采购成本": "{:.2f}", "核算价": "{:.2f}",
@@ -552,10 +613,15 @@ if only_above_thr:
             use_container_width=True, height=380, hide_index=True
         )
         csv_bytes = suggest_df.to_csv(index=False).encode("utf-8-sig")
+        fname = (
+            f"分层调价方案_{tier_high_floor}pct分界_{threshold}pct基准线.csv"
+            if use_tiered
+            else f"调价方案_{adj_pct:+d}pct_{threshold}pct基准线.csv"
+        )
         st.download_button(
             "📋 下载调价方案清单（CSV）",
             data=csv_bytes,
-            file_name=f"调价方案_{adj_pct:+d}pct_{threshold}pct基准线.csv",
+            file_name=fname,
             mime="text/csv",
         )
 
