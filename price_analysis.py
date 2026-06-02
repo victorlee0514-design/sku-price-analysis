@@ -507,51 +507,105 @@ st.dataframe(
 # ── 调价建议清单 ──────────────────────────────────────────────────────────────
 st.subheader("调价建议清单")
 
-below_thr = view2[view2["调整后毛利率"] < thr].copy()
+if only_above_thr:
+    # 筛选规则开启：呈现对高于基准线 SKU 做出的调整
+    above_df = view2[view2["当前毛利率"] > thr].copy()
 
-if len(below_thr) == 0:
-    st.success(f"✅ 当前筛选范围内所有 SKU 均已达到 {threshold}% 毛利基准，无需调价。")
+    if len(above_df) == 0:
+        st.warning(f"当前筛选范围内无毛利率高于 {threshold}% 的 SKU。")
+    elif adj_pct == 0:
+        st.info(
+            f"筛选规则已开启：仅对高于基准线（{threshold}%）的 SKU 调价。"
+            f"当前共 **{len(above_df)}** 个 SKU 符合条件，均值毛利率 **{above_df['当前毛利率'].mean():.1%}**。"
+            f"调整左侧「调价幅度」滑块查看调价方案。"
+        )
+    else:
+        n_still_above = int((above_df["调整后毛利率"] >= thr).sum())
+        n_drop_below  = int((above_df["调整后毛利率"] < thr).sum())
+        st.caption(
+            f"共 **{len(above_df)}** 个毛利率高于基准线（{threshold}%）的 SKU 参与此次 **{adj_pct:+d}%** 调价。"
+            f"调价后仍高于基准线：**{n_still_above}** 个；跌破基准线：**{n_drop_below}** 个（需关注）。"
+        )
+        above_df["调价建议"] = above_df.apply(
+            lambda r: f"¥{r['核算价']:.2f} → ¥{r['调整后核算价']:.2f}（{adj_pct:+d}%）",
+            axis=1,
+        )
+        above_df = above_df.sort_values("调整后毛利率", ascending=True)
+        suggest_df = above_df[["SKU编码", "品牌", "品类", "采购成本", "核算价",
+                                "当前毛利率", "调整后核算价", "调整后毛利率", "调价建议", "异常"]
+                              ].reset_index(drop=True)
+
+        fmt_sug = {
+            "采购成本": "{:.2f}", "核算价": "{:.2f}",
+            "当前毛利率": "{:.1%}", "调整后核算价": "{:.2f}", "调整后毛利率": "{:.1%}",
+        }
+
+        def above_row_color(row):
+            m = row["调整后毛利率"]
+            bg = "#fff0f0" if m < 0.08 else ("#fffbea" if m < thr else "#f0fff4")
+            return [f"background-color:{bg};color:#1a1a1a"] * len(row)
+
+        st.dataframe(
+            suggest_df.style.apply(above_row_color, axis=1)
+            .map(style_margin, subset=["当前毛利率", "调整后毛利率"])
+            .format(fmt_sug),
+            use_container_width=True, height=380, hide_index=True
+        )
+        csv_bytes = suggest_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📋 下载调价方案清单（CSV）",
+            data=csv_bytes,
+            file_name=f"调价方案_{adj_pct:+d}pct_{threshold}pct基准线.csv",
+            mime="text/csv",
+        )
+
 else:
-    n_danger = int((below_thr["调整后毛利率"] < 0.08).sum())
-    st.caption(
-        f"共 **{len(below_thr)}** 个 SKU 低于 {threshold}% 基准线"
-        f"（其中 **{n_danger}** 个危险级 <8%）。按紧迫程度排序，红色行优先处理。"
-    )
-    below_thr = below_thr.sort_values("调整后毛利率", ascending=True)
-    below_thr["建议核算价"]   = below_thr["最低达标价格"]
-    below_thr["建议调价幅度"] = (
-        (below_thr["建议核算价"] - below_thr["核算价"]) / below_thr["核算价"]
-    )
-    below_thr["调价建议"] = below_thr.apply(
-        lambda r: f"¥{r['核算价']:.2f} → ¥{r['建议核算价']:.2f}（{r['建议调价幅度']*100:+.1f}%）",
-        axis=1,
-    )
-    suggest_df = below_thr[["SKU编码", "品牌", "品类", "采购成本", "核算价",
-                             "当前毛利率", "建议核算价", "建议调价幅度", "调价建议", "异常"]
-                           ].reset_index(drop=True)
+    # 筛选规则关闭：原逻辑，展示低于基准线需涨价的 SKU
+    below_thr = view2[view2["调整后毛利率"] < thr].copy()
 
-    fmt_sug = {
-        "采购成本": "{:.2f}", "核算价": "{:.2f}",
-        "当前毛利率": "{:.1%}", "建议核算价": "{:.2f}", "建议调价幅度": "{:+.1%}",
-    }
+    if len(below_thr) == 0:
+        st.success(f"✅ 当前筛选范围内所有 SKU 均已达到 {threshold}% 毛利基准，无需调价。")
+    else:
+        n_danger = int((below_thr["调整后毛利率"] < 0.08).sum())
+        st.caption(
+            f"共 **{len(below_thr)}** 个 SKU 低于 {threshold}% 基准线"
+            f"（其中 **{n_danger}** 个危险级 <8%）。按紧迫程度排序，红色行优先处理。"
+        )
+        below_thr = below_thr.sort_values("调整后毛利率", ascending=True)
+        below_thr["建议核算价"]   = below_thr["最低达标价格"]
+        below_thr["建议调价幅度"] = (
+            (below_thr["建议核算价"] - below_thr["核算价"]) / below_thr["核算价"]
+        )
+        below_thr["调价建议"] = below_thr.apply(
+            lambda r: f"¥{r['核算价']:.2f} → ¥{r['建议核算价']:.2f}（{r['建议调价幅度']*100:+.1f}%）",
+            axis=1,
+        )
+        suggest_df = below_thr[["SKU编码", "品牌", "品类", "采购成本", "核算价",
+                                 "当前毛利率", "建议核算价", "建议调价幅度", "调价建议", "异常"]
+                               ].reset_index(drop=True)
 
-    def urgent_row(row):
-        bg = "#fff0f0" if row["当前毛利率"] < 0.08 else "#fffbea"
-        return [f"background-color:{bg};color:#1a1a1a"] * len(row)
+        fmt_sug = {
+            "采购成本": "{:.2f}", "核算价": "{:.2f}",
+            "当前毛利率": "{:.1%}", "建议核算价": "{:.2f}", "建议调价幅度": "{:+.1%}",
+        }
 
-    st.dataframe(
-        suggest_df.style.apply(urgent_row, axis=1)
-        .map(style_margin, subset=["当前毛利率"])
-        .format(fmt_sug),
-        use_container_width=True, height=380, hide_index=True
-    )
-    csv_bytes = suggest_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "📋 下载调价建议清单（CSV）",
-        data=csv_bytes,
-        file_name=f"调价建议_{threshold}pct基准线.csv",
-        mime="text/csv",
-    )
+        def urgent_row(row):
+            bg = "#fff0f0" if row["当前毛利率"] < 0.08 else "#fffbea"
+            return [f"background-color:{bg};color:#1a1a1a"] * len(row)
+
+        st.dataframe(
+            suggest_df.style.apply(urgent_row, axis=1)
+            .map(style_margin, subset=["当前毛利率"])
+            .format(fmt_sug),
+            use_container_width=True, height=380, hide_index=True
+        )
+        csv_bytes = suggest_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📋 下载调价建议清单（CSV）",
+            data=csv_bytes,
+            file_name=f"调价建议_{threshold}pct基准线.csv",
+            mime="text/csv",
+        )
 
 st.divider()
 
