@@ -56,13 +56,14 @@ if not uploaded:
 2. **设置筛选**：在左侧选择品牌和品类（默认显示全部）
 3. **调整调价幅度**：拖动「调价幅度」滑块，正数=涨价，负数=降价
 4. **设置基准线**：拖动「毛利率基准线」滑块（默认 10%）
-5. **读取分析结果**：
-   - 顶部摘要卡：一句话总结调价影响
+5. **调价范围筛选**：勾选「仅调整高于基准线的 SKU」（默认勾选），则当前毛利率 ≤ 基准线的 SKU 不参与调价，核算价维持不变；取消勾选则对所有 SKU 应用调价幅度
+6. **读取分析结果**：
+   - 顶部摘要卡：一句话总结调价影响（含排除 SKU 数）
    - 三张图：SKU 健康分布 / 毛利率分布对比 / 品类对比
    - 多幅度对比表：同时查看 5 种调价幅度的结果
    - 品类汇总表：各品类均值毛利率和风险 SKU 数
    - SKU 明细表：含最低达标价格和异常标记
-6. **导出**：点击「导出带格式 Excel」，下载带颜色的 .xlsx 文件
+7. **导出**：点击「导出带格式 Excel」，下载带颜色的 .xlsx 文件
         """)
 
     with st.expander("🎨 颜色说明"):
@@ -169,6 +170,11 @@ with st.sidebar:
     st.header("调价参数")
     adj_pct   = st.slider("调价幅度（%）", -30, 30, 0, 1, help="正数=涨价，负数=降价")
     threshold = st.slider("毛利率基准线（%）", 5, 25, 10, 1)
+    only_above_thr = st.checkbox(
+        "仅调整高于基准线的 SKU",
+        value=True,
+        help="勾选后：当前毛利率 ≤ 基准线的 SKU 不参与调价，核算价维持不变",
+    )
 
 # ── 筛选 + 计算 ───────────────────────────────────────────────────────────────
 view = df.copy()
@@ -177,12 +183,20 @@ if sel_brand != "全部":
 if sel_cat != "全部":
     view = view[view["品类"] == sel_cat]
 view = view.copy()
-view["调整后核算价"] = view["核算价"] * (1 + adj_pct / 100)
+thr = threshold / 100
+if only_above_thr:
+    view["调整后核算价"] = np.where(
+        view["当前毛利率"] > thr,
+        view["核算价"] * (1 + adj_pct / 100),
+        view["核算价"],
+    )
+else:
+    view["调整后核算价"] = view["核算价"] * (1 + adj_pct / 100)
 view["调整后毛利率"] = (view["调整后核算价"] - view["采购成本"]) / view["调整后核算价"]
 view["单位利润变化"] = view["调整后核算价"] - view["核算价"]
 
-thr      = threshold / 100
-n_total  = len(view)
+n_total    = len(view)
+n_excluded = int((view["当前毛利率"] <= thr).sum()) if only_above_thr else 0
 n_red    = int((view["调整后毛利率"] < 0.08).sum())
 n_yellow = int(((view["调整后毛利率"] >= 0.08) & (view["调整后毛利率"] < thr)).sum())
 n_green  = int((view["调整后毛利率"] >= thr).sum())
@@ -207,6 +221,10 @@ delta_sign  = "减少" if delta_below < 0 else ("增加" if delta_below > 0 else
 delta_abs   = abs(delta_below)
 pp_change   = (avg_after - avg_before) * 100
 
+filter_note = (
+    f"，其中 **{n_excluded}** 个低于基准线的 SKU 已排除调价（筛选规则：仅调整高于 {threshold}% 的 SKU）"
+    if only_above_thr and n_excluded > 0 else ""
+)
 if adj_pct == 0:
     summary_text = (
         f"当前未调价。共 **{n_total:,}** 个 SKU，其中 **{n_below0}** 个低于基准线 {threshold}%，"
@@ -216,7 +234,7 @@ else:
     summary_text = (
         f"调价 **{adj_pct:+d}%** 后，低于基准线的 SKU 从 **{n_below0}** 个{delta_sign}至 **{n_below}** 个"
         f"（{delta_sign} {delta_abs} 个），均值毛利率从 **{avg_before:.1%}** → **{avg_after:.1%}**"
-        f"（{pp_change:+.1f}pp）。**{best_cat}** 品类改善最显著（{best_pp:+.1f}pp）。"
+        f"（{pp_change:+.1f}pp）。**{best_cat}** 品类改善最显著（{best_pp:+.1f}pp）{filter_note}。"
     )
 
 st.info(f"📊 **调价影响摘要** · {summary_text}")
@@ -297,7 +315,9 @@ st.subheader("多幅度调价对比")
 scenarios = [-10, -5, 0, 5, 10]
 scenario_rows = []
 for s in scenarios:
-    adj_price  = view["核算价"] * (1 + s / 100)
+    adj_price = view["核算价"] * (1 + s / 100)
+    if only_above_thr:
+        adj_price = np.where(view["当前毛利率"] > thr, adj_price, view["核算价"])
     adj_margin = (adj_price - view["采购成本"]) / adj_price
     scenario_rows.append({
         "调价幅度": f"{s:+d}%",
