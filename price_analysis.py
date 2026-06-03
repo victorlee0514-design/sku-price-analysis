@@ -163,9 +163,9 @@ with st.sidebar:
     st.divider()
     st.header("筛选")
     brands = ["全部"] + sorted(df["品牌"].dropna().unique().tolist())
-    cats   = ["全部"] + sorted(df["品类"].dropna().unique().tolist())
+    cat_options = sorted(df["品类"].dropna().unique().tolist())
     sel_brand = st.selectbox("品牌", brands)
-    sel_cat   = st.selectbox("品类", cats)
+    sel_cat   = st.multiselect("品类", cat_options, placeholder="全部（不限）")
     st.divider()
     st.header("调价参数")
     threshold = st.slider("毛利率基准线（%）", 5, 25, 10, 1)
@@ -199,8 +199,8 @@ with st.sidebar:
 view = df.copy()
 if sel_brand != "全部":
     view = view[view["品牌"] == sel_brand]
-if sel_cat != "全部":
-    view = view[view["品类"] == sel_cat]
+if sel_cat:
+    view = view[view["品类"].isin(sel_cat)]
 view = view.copy()
 thr = threshold / 100
 high_floor = tier_high_floor / 100
