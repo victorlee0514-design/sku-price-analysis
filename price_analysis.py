@@ -124,8 +124,12 @@ if file_mode == "store":
         return df
 
     raw_s = load_store(uploaded)
-    valid_s = raw_s[raw_s["折后单价"].notna() & raw_s["核算价"].notna() & (raw_s["核算价"] > 0)].copy()
+    valid_s = raw_s[
+        raw_s["折后单价"].notna() & raw_s["核算价"].notna() &
+        (raw_s["核算价"] > 0) & (raw_s["折后单价"] > 0)
+    ].copy()
     valid_s["门店毛利率"] = (valid_s["折后单价"] - valid_s["核算价"]) / valid_s["折后单价"]
+    valid_s = valid_s[np.isfinite(valid_s["门店毛利率"])].copy()
     valid_s["是否亏本"] = valid_s["折后单价"] < valid_s["核算价"]
     n_skip = len(raw_s) - len(valid_s)
 
