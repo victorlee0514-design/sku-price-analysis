@@ -98,17 +98,250 @@ A：最低达标价格 = 采购成本 ÷ (1 - 毛利率基准线)，即刚好达
 def detect_file_type(source):
     probe = pd.read_excel(source, engine="calamine", nrows=2)
     first_col = str(probe.columns[0]).lower()
-    if "超过1w" in first_col or "出库查询" in first_col or "超过" in first_col:
-        return "store"
+    if "超过1w" in first_col or "超过" in first_col:
+        return "store_raw"
     row1 = " ".join(str(v) for v in probe.iloc[0].values).lower()
     if "sku编码" in row1 and "折后单价" in row1:
-        return "store"
+        return "store_raw"
+    all_cols = " ".join(str(c) for c in probe.columns)
+    if "加权平均折后单价" in all_cols:
+        return "agg"
     return "hq"
 
 file_mode = detect_file_type(uploaded)
 
-# ── 门店定价合理性分析 ────────────────────────────────────────────────────────
-if file_mode == "store":
+# ── 聚合文件三Tab分析 ─────────────────────────────────────────────────────────
+if file_mode == "agg":
+    @st.cache_data
+    def load_agg(source):
+        df = pd.read_excel(source, engine="calamine")
+        for c in ["加权平均成本价","加权平均核算价","加权平均折后单价","折扣率（折后/核算）"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
+
+    agg = load_agg(uploaded)
+    brand_col  = next((c for c in agg.columns if "品牌" in c), None)
+    cat_col    = next((c for c in agg.columns if "分类" in c or "品类" in c), None)
+    region_col = next((c for c in agg.columns if "大区" in c), None)
+
+    with st.sidebar:
+        st.divider()
+        st.header("筛选")
+        _brands = ["全部"] + sorted(agg[brand_col].dropna().unique().tolist()) if brand_col else ["全部"]
+        _cats   = sorted(agg[cat_col].dropna().unique().tolist()) if cat_col else []
+        _sel_brand = st.selectbox("品牌", _brands)
+        _sel_cat   = st.multiselect("品类", _cats, placeholder="全部（不限）") if _cats else []
+
+    view = agg.copy()
+    if _sel_brand != "全部" and brand_col:
+        view = view[view[brand_col] == _sel_brand]
+    if _sel_cat and cat_col:
+        view = view[view[cat_col].isin(_sel_cat)]
+
+    # 计算两层毛利率
+    HAS_COST = "加权平均成本价" in view.columns and view["加权平均成本价"].notna().any()
+    HAS_SALE = "加权平均折后单价" in view.columns and view["加权平均折后单价"].notna().any()
+
+    hq_df = view[view["加权平均核算价"].notna() & view["加权平均成本价"].notna() &
+                 (view["加权平均核算价"] > 0) & (view["加权平均成本价"] > 0)].copy() if HAS_COST else pd.DataFrame()
+    if len(hq_df): hq_df["总部毛利率"] = (hq_df["加权平均核算价"] - hq_df["加权平均成本价"]) / hq_df["加权平均核算价"]
+
+    st_df = view[view["加权平均核算价"].notna() & view["加权平均折后单价"].notna() &
+                 (view["加权平均核算价"] > 0) & (view["加权平均折后单价"] > 1)].copy() if HAS_SALE else pd.DataFrame()
+    if len(st_df): st_df["门店毛利率"] = (st_df["加权平均折后单价"] - st_df["加权平均核算价"]) / st_df["加权平均折后单价"]
+
+    tab1, tab2, tab3 = st.tabs(["📊 总部毛利分析", "🏪 门店定价分析", "🔗 综合对比"])
+
+    # ─ Tab1：总部毛利分析 ──────────────────────────────────────────────────────
+    with tab1:
+        if not len(hq_df):
+            st.warning("当前文件无法进行总部毛利分析（缺少加权平均成本价列）。"); st.stop()
+        thr1 = st.slider("毛利率基准线（%）", 5, 25, 10, 1, key="thr1")
+        adj1 = st.slider("调价幅度（%）", -30, 30, 0, 1, key="adj1",
+                         help="正数=涨价，负数=降价（仅对高于基准线的 SKU 生效）")
+        thr1f = thr1 / 100
+        d1 = hq_df.copy()
+        d1["调后核算价"] = np.where(d1["总部毛利率"] > thr1f,
+                                    d1["加权平均核算价"] * (1 + adj1/100), d1["加权平均核算价"])
+        d1["调后毛利率"] = (d1["调后核算价"] - d1["加权平均成本价"]) / d1["调后核算价"]
+
+        n_tot = len(d1); avg_b = d1["总部毛利率"].mean(); avg_a = d1["调后毛利率"].mean()
+        n_red = int((d1["调后毛利率"] < 0.08).sum())
+        n_yel = int(((d1["调后毛利率"] >= 0.08) & (d1["调后毛利率"] < thr1f)).sum())
+        n_grn = int((d1["调后毛利率"] >= thr1f).sum())
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("SKU 数", f"{n_tot:,}"); c2.metric("低于基准线", f"{n_red+n_yel:,}")
+        c3.metric("当前均值毛利率", f"{avg_b:.1%}"); c4.metric("调整后均值", f"{avg_a:.1%}", f"{avg_a-avg_b:+.1%}")
+        st.divider()
+        v1,v2 = st.columns([1,2])
+        with v1:
+            st.markdown("#### SKU 健康分布")
+            fig = go.Figure(go.Pie(labels=["健康","预警","危险"], values=[n_grn,n_yel,n_red],
+                hole=0.6, marker_colors=["#2ecc71","#f39c12","#e74c3c"], textinfo="percent+value",
+                hovertemplate="%{label}<br>%{value} 个<br>%{percent}<extra></extra>"))
+            fig.update_layout(margin=dict(t=10,b=10,l=10,r=10), height=250,
+                legend=dict(orientation="h",yanchor="bottom",y=-0.3,font_size=11),
+                annotations=[dict(text=f"<b>{n_grn}</b><br>健康",x=0.5,y=0.5,font_size=14,showarrow=False)])
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False})
+        with v2:
+            if brand_col:
+                st.markdown("#### 各品牌均值毛利率")
+                b_agg = d1.groupby(brand_col)[["总部毛利率","调后毛利率"]].mean().sort_values("总部毛利率") * 100
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(name="调价前", x=b_agg.index, y=b_agg["总部毛利率"],
+                    marker_color="rgba(52,152,219,0.6)", hovertemplate="%{x}<br>%{y:.1f}%<extra>调价前</extra>"))
+                fig2.add_trace(go.Bar(name="调价后", x=b_agg.index, y=b_agg["调后毛利率"],
+                    marker_color="rgba(46,204,113,0.6)", hovertemplate="%{x}<br>%{y:.1f}%<extra>调价后</extra>"))
+                fig2.add_hline(y=thr1, line_dash="dash", line_color="#e74c3c", line_width=1.5)
+                fig2.update_layout(margin=dict(t=10,b=10,l=10,r=10), height=250, barmode="group",
+                    legend=dict(orientation="h",yanchor="bottom",y=-0.35,font_size=11))
+                st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar":False})
+        st.divider()
+        st.markdown("#### SKU 明细")
+        show1 = d1[[brand_col or "品牌名称", cat_col or "产品分类描述", "加权平均成本价",
+                     "加权平均核算价","总部毛利率","调后核算价","调后毛利率"]].copy() if brand_col else d1
+        def _sm1(v):
+            try:
+                f=float(v); return ("background-color:#f8d7da" if f<0.08 else
+                    "background-color:#fff3cd" if f<thr1f else "background-color:#d4edda") + ";color:#1a1a1a"
+            except: return ""
+        subset1 = [c for c in ["总部毛利率","调后毛利率"] if c in show1.columns]
+        fmt1 = {c:"{:.1%}" for c in subset1}
+        fmt1.update({c:"{:.2f}" for c in ["加权平均成本价","加权平均核算价","调后核算价"] if c in show1.columns})
+        st.dataframe(show1.style.map(_sm1, subset=subset1).format(fmt1),
+                     use_container_width=True, height=380, hide_index=True)
+
+    # ─ Tab2：门店定价分析 ──────────────────────────────────────────────────────
+    with tab2:
+        if not len(st_df):
+            st.warning("当前文件缺少加权平均折后单价列，无法进行门店定价分析。"); st.stop()
+        thr2 = st.slider("门店毛利率基准线（%）", 0, 30, 10, 1, key="thr2")
+        thr2f = thr2 / 100
+        n2_loss = int((st_df["门店毛利率"] < 0).sum())
+        n2_low  = int(((st_df["门店毛利率"] >= 0) & (st_df["门店毛利率"] < thr2f)).sum())
+        n2_ok   = int((st_df["门店毛利率"] >= thr2f).sum())
+        avg2 = st_df["门店毛利率"].mean()
+        st.info(f"共 **{len(st_df):,}** 条 SKU · 亏本销售 **{n2_loss}** 条 · 平均门店毛利率 **{avg2:.1%}**")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("SKU 数", f"{len(st_df):,}")
+        c2.metric("亏本", f"{n2_loss}", delta_color="inverse")
+        c3.metric("低于基准线", f"{n2_low}", delta_color="inverse")
+        c4.metric("平均门店毛利率", f"{avg2:.1%}")
+        st.divider()
+        v1,v2 = st.columns([1,2])
+        with v1:
+            st.markdown("#### 门店定价健康分布")
+            fig = go.Figure(go.Pie(labels=["健康","微利","亏本"], values=[n2_ok,n2_low,n2_loss],
+                hole=0.6, marker_colors=["#2ecc71","#f39c12","#e74c3c"], textinfo="percent+value"))
+            fig.update_layout(margin=dict(t=10,b=10,l=10,r=10), height=250,
+                legend=dict(orientation="h",yanchor="bottom",y=-0.3,font_size=11),
+                annotations=[dict(text=f"<b>{n2_ok}</b><br>健康",x=0.5,y=0.5,font_size=14,showarrow=False)])
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False})
+        with v2:
+            if brand_col:
+                st.markdown("#### 各品牌平均门店毛利率")
+                b2 = st_df.groupby(brand_col)["门店毛利率"].mean().sort_values() * 100
+                bar2 = go.Figure(go.Bar(x=b2.values, y=b2.index, orientation="h",
+                    marker_color=["#e74c3c" if v<thr2 else "#2ecc71" for v in b2.values],
+                    hovertemplate="%{y}<br>%{x:.1f}%<extra></extra>"))
+                bar2.add_vline(x=thr2, line_dash="dash", line_color="#e74c3c")
+                bar2.update_layout(margin=dict(t=10,b=10,l=10,r=10), height=250, xaxis_title="门店毛利率（%）")
+                st.plotly_chart(bar2, use_container_width=True, config={"displayModeBar":False})
+        st.divider()
+        st.markdown("#### 低于基准线 SKU 明细")
+        prob2 = st_df[st_df["门店毛利率"] < thr2f].sort_values("门店毛利率")
+        cols2 = [c for c in [brand_col, cat_col, "加权平均核算价","加权平均折后单价","门店毛利率","折扣率（折后/核算）"] if c and c in prob2.columns]
+        def _sm2(v):
+            try:
+                f=float(v); return ("background-color:#f8d7da" if f<0 else "background-color:#fff3cd") + ";color:#1a1a1a"
+            except: return ""
+        fmt2 = {c:"{:.1%}" for c in ["门店毛利率","折扣率（折后/核算）"] if c in cols2}
+        fmt2.update({c:"{:.2f}" for c in ["加权平均核算价","加权平均折后单价"] if c in cols2})
+        st.dataframe(prob2[cols2].style.map(_sm2, subset=["门店毛利率"]).format(fmt2),
+                     use_container_width=True, height=380, hide_index=True)
+        st.download_button("📋 下载低于基准线明细（CSV）",
+            data=prob2[cols2].to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"门店定价异常_{thr2}pct基准线.csv", mime="text/csv")
+
+    # ─ Tab3：综合对比 ──────────────────────────────────────────────────────────
+    with tab3:
+        if not len(hq_df) or not len(st_df):
+            st.warning("综合对比需要同时具备成本价和折后单价数据。"); st.stop()
+        st.markdown("#### 价值链全链路毛利率对比")
+        st.caption("总部毛利率 = (核算价 - 成本价) / 核算价 ｜ 门店毛利率 = (折后单价 - 核算价) / 折后单价 ｜ 全链路毛利率 = (折后单价 - 成本价) / 折后单价")
+
+        # 合并两层数据（按 SKU 编码 join）
+        sku_col = next((c for c in agg.columns if "sku" in c.lower() or "编码" in c), None)
+        if sku_col:
+            merged = pd.merge(
+                hq_df[[sku_col, brand_col or "品牌名称", "加权平均成本价","加权平均核算价","总部毛利率"]],
+                st_df[[sku_col, "加权平均折后单价","门店毛利率"]],
+                on=sku_col, how="inner"
+            )
+        else:
+            merged = pd.concat([hq_df.assign(门店毛利率=None), st_df.assign(总部毛利率=None)], ignore_index=True)
+
+        if len(merged):
+            merged["全链路毛利率"] = (merged["加权平均折后单价"] - merged["加权平均成本价"]) / merged["加权平均折后单价"]
+            merged["⚠️"] = np.where(
+                (merged["总部毛利率"] > 0.1) & (merged["门店毛利率"] < 0),
+                "总部高利润但门店亏本", np.where(
+                (merged["门店毛利率"] > 0.1) & (merged["总部毛利率"] < 0.08),
+                "门店利润健康但总部偏低", ""))
+
+            # 品牌汇总图
+            if brand_col and brand_col in merged.columns:
+                b3 = merged.groupby(brand_col)[["总部毛利率","门店毛利率","全链路毛利率"]].mean().sort_values("全链路毛利率") * 100
+                fig3 = go.Figure()
+                for col_name, color, label in [
+                    ("总部毛利率","rgba(52,152,219,0.8)","总部毛利率"),
+                    ("门店毛利率","rgba(231,76,60,0.8)","门店毛利率"),
+                    ("全链路毛利率","rgba(46,204,113,0.8)","全链路毛利率"),
+                ]:
+                    if col_name in b3.columns:
+                        fig3.add_trace(go.Bar(name=label, x=b3.index, y=b3[col_name],
+                            marker_color=color, hovertemplate=f"%{{x}}<br>{label} %{{y:.1f}}%<extra></extra>"))
+                fig3.add_hline(y=0, line_color="#888", line_width=1)
+                fig3.update_layout(barmode="group", height=320,
+                    margin=dict(t=10,b=10,l=10,r=10),
+                    legend=dict(orientation="h",yanchor="bottom",y=-0.35,font_size=11))
+                st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar":False})
+
+            st.divider()
+            c1,c2,c3 = st.columns(3)
+            c1.metric("平均总部毛利率", f"{merged['总部毛利率'].mean():.1%}")
+            c2.metric("平均门店毛利率", f"{merged['门店毛利率'].mean():.1%}")
+            c3.metric("平均全链路毛利率", f"{merged['全链路毛利率'].mean():.1%}")
+
+            st.divider()
+            flag_cnt = int((merged["⚠️"] != "").sum())
+            if flag_cnt:
+                st.warning(f"⚠️ 发现 **{flag_cnt}** 条异常：总部高毛利但门店亏本，或反向不匹配。")
+            show3_cols = [c for c in [sku_col, brand_col, "加权平均成本价","加权平均核算价",
+                "加权平均折后单价","总部毛利率","门店毛利率","全链路毛利率","⚠️"] if c and c in merged.columns]
+            fmt3 = {c:"{:.1%}" for c in ["总部毛利率","门店毛利率","全链路毛利率"] if c in show3_cols}
+            fmt3.update({c:"{:.2f}" for c in ["加权平均成本价","加权平均核算价","加权平均折后单价"] if c in show3_cols})
+
+            def _flag(row):
+                if row.get("⚠️",""):
+                    return ["background-color:#fff0e0;color:#1a1a1a"] * len(row)
+                return [""] * len(row)
+
+            st.markdown("#### SKU 全链路明细")
+            st.dataframe(merged[show3_cols].sort_values("全链路毛利率")
+                .style.apply(_flag, axis=1).format(fmt3),
+                use_container_width=True, height=420, hide_index=True)
+            st.download_button("📥 下载综合对比明细（CSV）",
+                data=merged[show3_cols].to_csv(index=False).encode("utf-8-sig"),
+                file_name="综合对比全链路.csv", mime="text/csv")
+        else:
+            st.info("没有同时具备三层价格的 SKU，无法生成综合对比。")
+
+    st.stop()
+
+# ── 门店定价合理性分析（原始出库流水）────────────────────────────────────────
+if file_mode == "store_raw":
     @st.cache_data
     def load_store(source):
         COLS = ["sku编码","产品名称","产品俗称","小区","大区","品牌名称",
