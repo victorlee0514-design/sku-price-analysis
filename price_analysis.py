@@ -274,8 +274,9 @@ if file_mode in ("agg", "store_raw"):
                 st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar":False})
         st.divider()
         st.markdown("#### SKU 明细")
-        show1 = d1[[brand_col or "品牌名称", cat_col or "产品分类描述", "加权平均成本价",
-                     "加权平均核算价","总部毛利率","调后核算价","调后毛利率"]].copy() if brand_col else d1
+        _cols1 = [c for c in [brand_col, cat_col, "加权平均成本价",
+                               "加权平均核算价","总部毛利率","调后核算价","调后毛利率"] if c and c in d1.columns]
+        show1 = d1[_cols1].copy() if _cols1 else d1
         def _sm1(v):
             try:
                 f=float(v); return ("background-color:#f8d7da" if f<0.08 else
