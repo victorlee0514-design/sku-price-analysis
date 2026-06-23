@@ -124,14 +124,17 @@ if file_mode == "store":
         return df
 
     raw_s = load_store(uploaded)
-    valid_s = raw_s[
+    _has_price = raw_s[
         raw_s["折后单价"].notna() & raw_s["核算价"].notna() &
         (raw_s["核算价"] > 0) & (raw_s["折后单价"] > 0)
     ].copy()
-    valid_s["门店毛利率"] = (valid_s["折后单价"] - valid_s["核算价"]) / valid_s["折后单价"]
-    valid_s = valid_s[np.isfinite(valid_s["门店毛利率"])].copy()
+    _has_price["门店毛利率"] = ((_has_price["折后单价"] - _has_price["核算价"]) / _has_price["折后单价"])
+    _has_price = _has_price[np.isfinite(_has_price["门店毛利率"])].copy()
+    # 折后单价 < 1元 = 测试/录入错误，剔出分析
+    anomaly_s = _has_price[_has_price["折后单价"] < 1].copy()
+    valid_s   = _has_price[_has_price["折后单价"] >= 1].copy()
     valid_s["是否亏本"] = valid_s["折后单价"] < valid_s["核算价"]
-    n_skip = len(raw_s) - len(valid_s)
+    n_skip = len(raw_s) - len(valid_s) - len(anomaly_s)
 
     with st.sidebar:
         st.divider()
@@ -157,10 +160,11 @@ if file_mode == "store":
 
     st.markdown("## 门店定价合理性分析")
     st.caption("出库敏感数据 · 以核算价为门店成本，折后单价为门店售价，计算门店实际毛利率")
+    anomaly_note = f"  ⚠️ 另有 **{len(anomaly_s)}** 条折后单价 < 1元的疑似录入错误记录已剔除（不计入分析）。" if len(anomaly_s) > 0 else ""
     st.info(
         f"📊 共 **{len(view_s):,}** 条有效 B 端销售记录 · "
         f"亏本销售 **{n_loss}** 条 · 平均门店毛利率 **{avg_sm:.1%}** · "
-        f"已过滤仓间调拨记录 **{n_skip}** 条（无折后单价）"
+        f"已过滤仓间调拨记录 **{n_skip}** 条（无折后单价）。{anomaly_note}"
     )
 
     c1, c2, c3, c4 = st.columns(4)
