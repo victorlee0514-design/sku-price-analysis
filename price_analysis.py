@@ -144,8 +144,10 @@ if file_mode == "agg":
     HAS_SALE = "加权平均折后单价" in view.columns and view["加权平均折后单价"].notna().any()
 
     hq_df = view[view["加权平均核算价"].notna() & view["加权平均成本价"].notna() &
-                 (view["加权平均核算价"] > 0) & (view["加权平均成本价"] > 0)].copy() if HAS_COST else pd.DataFrame()
-    if len(hq_df): hq_df["总部毛利率"] = (hq_df["加权平均核算价"] - hq_df["加权平均成本价"]) / hq_df["加权平均核算价"]
+                 (view["加权平均核算价"] >= 1) & (view["加权平均成本价"] > 0)].copy() if HAS_COST else pd.DataFrame()
+    if len(hq_df):
+        hq_df["总部毛利率"] = (hq_df["加权平均核算价"] - hq_df["加权平均成本价"]) / hq_df["加权平均核算价"]
+        hq_df = hq_df[np.isfinite(hq_df["总部毛利率"])].copy()
 
     st_df = view[view["加权平均核算价"].notna() & view["加权平均折后单价"].notna() &
                  (view["加权平均核算价"] > 0) & (view["加权平均折后单价"] > 1)].copy() if HAS_SALE else pd.DataFrame()
@@ -154,9 +156,12 @@ if file_mode == "agg":
     tab1, tab2, tab3 = st.tabs(["📊 总部毛利分析", "🏪 门店定价分析", "🔗 综合对比"])
 
     # ─ Tab1：总部毛利分析 ──────────────────────────────────────────────────────
+    n_excl_hq = len(view[view["加权平均核算价"].notna() & (view["加权平均核算价"] < 1)]) if HAS_COST else 0
     with tab1:
         if not len(hq_df):
             st.warning("当前文件无法进行总部毛利分析（缺少加权平均成本价列）。"); st.stop()
+        if n_excl_hq:
+            st.caption(f"ℹ️ 已剔除 {n_excl_hq} 条核算价 < 1 元的异常记录（赠品/占位符），不参与分析。")
         thr1 = st.slider("毛利率基准线（%）", 5, 25, 10, 1, key="thr1")
         adj1 = st.slider("调价幅度（%）", -30, 30, 0, 1, key="adj1",
                          help="正数=涨价，负数=降价（仅对高于基准线的 SKU 生效）")
