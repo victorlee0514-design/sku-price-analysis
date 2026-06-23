@@ -419,135 +419,205 @@ if file_mode in ("agg", "store_raw"):
         if not len(hq_df) or not len(st_df):
             st.warning("定价建议需要同时具备总部毛利率和门店毛利率数据。")
         else:
-            st.caption("以 SKU 为维度，综合总部利润 × 门店利润 × 销量三者，输出核算价调整方向与原因")
+            st.caption("以 SKU 为维度，综合总部利润 × 门店利润 × 销量三者，输出核算价调整方向、建议新价格与业务影响测算")
+
             col_s1, col_s2 = st.columns(2)
             hq_thr4 = col_s1.slider("总部毛利率基准线（%）", 0, 20, 8, 1, key="hq_thr4")
             st_thr4 = col_s2.slider("门店毛利率基准线（%）", 0, 30, 15, 1, key="st_thr4")
-            hq_f4 = hq_thr4 / 100; st_f4 = st_thr4 / 100
+            hq_f4 = hq_thr4 / 100
+            st_f4 = st_thr4 / 100
 
             sku_c4 = next((c for c in hq_df.columns if "sku" in c.lower() or "编码" in c), None)
             vol_c  = next((c for c in view.columns if "出库单量" in c or "单数" in c), None)
-
             if not sku_c4:
-                st.warning("无法识别 SKU 编码列。"); st.stop()
-
-            left_cols  = [c for c in [sku_c4, brand_col, cat_col, "加权平均成本价", "加权平均核算价", "总部毛利率"] if c and c in hq_df.columns]
-            right_cols = [c for c in [sku_c4, "加权平均折后单价", "门店毛利率"] if c and c in st_df.columns]
-            rec = pd.merge(hq_df[left_cols], st_df[right_cols], on=sku_c4, how="inner")
-
-            if vol_c and vol_c in view.columns:
-                rec = pd.merge(rec, view[[sku_c4, vol_c]].drop_duplicates(), on=sku_c4, how="left")
+                st.warning("无法识别 SKU 编码列。")
             else:
-                vol_c = "出库单量（单数）"; rec[vol_c] = 1
+                left_c  = [c for c in [sku_c4, brand_col, cat_col, "加权平均成本价", "加权平均核算价", "总部毛利率"] if c and c in hq_df.columns]
+                right_c = [c for c in [sku_c4, "加权平均折后单价", "门店毛利率"] if c and c in st_df.columns]
+                rec = pd.merge(hq_df[left_c], st_df[right_c], on=sku_c4, how="inner")
 
-            def _classify(row):
-                hq_ok = row["总部毛利率"] >= hq_f4
-                st_ok = row["门店毛利率"] >= st_f4
-                if hq_ok and not st_ok:
-                    return "A", "建议降核算价", f"总部毛利率{row['总部毛利率']:.1%}充足，但门店毛利率仅{row['门店毛利率']:.1%}，核算价偏高门店压力大"
-                elif not hq_ok and st_ok:
-                    return "B", "可升核算价", f"门店毛利率{row['门店毛利率']:.1%}较高，总部毛利率仅{row['总部毛利率']:.1%}，存在上调空间"
-                elif not hq_ok and not st_ok:
-                    return "C", "全链路亏损，审视成本", f"总部{row['总部毛利率']:.1%}、门店{row['门店毛利率']:.1%}均低于基准，需重审供应商价格或市场竞争力"
+                if vol_c and vol_c in view.columns:
+                    rec = pd.merge(rec, view[[sku_c4, vol_c]].drop_duplicates(), on=sku_c4, how="left")
+                    rec[vol_c] = rec[vol_c].fillna(1)
                 else:
-                    return "D", "定价合理，维持", f"总部{row['总部毛利率']:.1%}、门店{row['门店毛利率']:.1%}均达标"
+                    vol_c = "出库单量（单数）"
+                    rec[vol_c] = 1
 
-            rec[["类型","建议","原因"]] = rec.apply(_classify, axis=1, result_type="expand")
-            rec = rec.sort_values([vol_c, "总部毛利率"], ascending=[False, True])
+                # 分类 & 建议新价格
+                def _classify(row):
+                    hq_ok = row["总部毛利率"] >= hq_f4
+                    st_ok = row["门店毛利率"] >= st_f4
+                    K = row["加权平均核算价"]
+                    C = row["加权平均成本价"]
+                    P = row["加权平均折后单价"]
+                    vol = row[vol_c]
 
-            na = int((rec["类型"]=="A").sum()); nb = int((rec["类型"]=="B").sum())
-            nc = int((rec["类型"]=="C").sum()); nd = int((rec["类型"]=="D").sum())
-            c1,c2,c3,c4_ = st.columns(4)
-            c1.metric("🔴 A — 建议降核算价", na)
-            c2.metric("🟢 B — 可升核算价", nb)
-            c3.metric("🟡 C — 全链路亏损", nc)
-            c4_.metric("⚪ D — 定价合理", nd)
-            st.divider()
+                    if hq_ok and not st_ok:
+                        K_new = max(P * (1 - st_f4), C * 1.01)
+                        delta  = (K_new - K) / K
+                        profit_chg = (K_new - C - (K - C)) * vol
+                        return ("A", "建议降核算价", round(K_new, 2), f"{delta:+.1%}", round(profit_chg, 0),
+                                f"总部毛利率 {row['总部毛利率']:.1%} 充足，但门店毛利率仅 {row['门店毛利率']:.1%}（<{st_thr4}% 基准）；"
+                                f"建议核算价从 {K:.2f} 降至 {K_new:.2f}，门店毛利率恢复至 {st_thr4}%")
 
-            sel_types = st.multiselect(
-                "筛选建议类型", ["A 降核算价","B 可升核算价","C 全链路亏损","D 定价合理"],
-                default=["A 降核算价","B 可升核算价","C 全链路亏损"])
-            tm = {"A 降核算价":"A","B 可升核算价":"B","C 全链路亏损":"C","D 定价合理":"D"}
-            disp4 = rec[rec["类型"].isin([tm[t] for t in sel_types])] if sel_types else rec
+                    elif not hq_ok and st_ok:
+                        K_new = C / (1 - hq_f4) if (1 - hq_f4) > 0 else K
+                        K_new = min(K_new, P * (1 - st_f4 * 0.5))
+                        delta  = (K_new - K) / K
+                        profit_chg = (K_new - C - (K - C)) * vol
+                        return ("B", "可升核算价", round(K_new, 2), f"{delta:+.1%}", round(profit_chg, 0),
+                                f"门店毛利率 {row['门店毛利率']:.1%} 较高，总部毛利率仅 {row['总部毛利率']:.1%}（<{hq_thr4}% 基准）；"
+                                f"建议核算价从 {K:.2f} 提至 {K_new:.2f}，总部毛利率恢复至 {hq_thr4}%")
 
-            show_c4 = [c for c in [sku_c4, brand_col, cat_col, "加权平均成本价","加权平均核算价",
-                                    "加权平均折后单价","总部毛利率","门店毛利率",vol_c,"类型","建议","原因"]
-                       if c and c in disp4.columns]
-            tc = {"A":"#f8d7da","B":"#d4edda","C":"#fff3cd","D":"#e9ecef"}
-            def _cr4(row): return [f"background-color:{tc.get(row['类型'],'')};color:#1a1a1a"]*len(row)
-            fmt4 = {c:"{:.1%}" for c in ["总部毛利率","门店毛利率"] if c in show_c4}
-            fmt4.update({c:"{:.2f}" for c in ["加权平均成本价","加权平均核算价","加权平均折后单价"] if c in show_c4})
-            st.dataframe(disp4[show_c4].style.apply(_cr4, axis=1).format(fmt4),
-                         use_container_width=True, height=460, hide_index=True)
+                    elif not hq_ok and not st_ok:
+                        K_new = C / (1 - hq_f4) if (1 - hq_f4) > 0 else K
+                        delta  = (K_new - K) / K
+                        profit_chg = (K_new - C - (K - C)) * vol
+                        return ("C", "全链路亏损，审视成本", round(K_new, 2),
+                                f"{delta:+.1%}（仅覆盖总部基准）", round(profit_chg, 0),
+                                f"总部 {row['总部毛利率']:.1%}、门店 {row['门店毛利率']:.1%} 均低于基准；"
+                                f"建议核算价最低调至 {K_new:.2f} 以覆盖总部成本，需同步评估供应商价格与市场竞争力")
 
-            # ── 带格式 Excel 下载 ───────────────────────────────────────────
-            def build_excel(df, hq_thr, st_thr):
-                from io import BytesIO
-                from openpyxl import Workbook
-                from openpyxl.styles import PatternFill, Font, Alignment
-                from openpyxl.utils import get_column_letter
-                import math
+                    else:
+                        return ("D", "定价合理，维持", round(K, 2), "—", 0.0,
+                                f"总部 {row['总部毛利率']:.1%}、门店 {row['门店毛利率']:.1%} 均达标，无需调整")
 
-                wb = Workbook()
-                ws = wb.active; ws.title = "定价建议"
-                ws.freeze_panes = "A2"
+                rec[["类型","建议","建议新核算价","调整幅度","总部毛利额变化（元）","原因"]] =                     rec.apply(_classify, axis=1, result_type="expand")
 
-                fills = {"A": PatternFill("solid", fgColor="F8D7DA"),
-                         "B": PatternFill("solid", fgColor="D4EDDA"),
-                         "C": PatternFill("solid", fgColor="FFF3CD"),
-                         "D": PatternFill("solid", fgColor="E9ECEF")}
-                hdr_fill = PatternFill("solid", fgColor="2C3E50")
-                hdr_font = Font(bold=True, color="FFFFFF", size=10)
-                pct_set  = {"总部毛利率","门店毛利率"}
-                price_set= {"加权平均成本价","加权平均核算价","加权平均折后单价"}
+                # 优先级：类型 × 销量分层
+                q67 = rec[vol_c].quantile(0.67)
+                q33 = rec[vol_c].quantile(0.33)
+                def _tier(v): return "高" if v >= q67 else ("中" if v >= q33 else "低")
+                rec["销量层级"] = rec[vol_c].apply(_tier)
 
-                cols = list(df.columns)
-                for j, h in enumerate(cols, 1):
-                    c = ws.cell(row=1, column=j, value=h)
-                    c.fill = hdr_fill; c.font = hdr_font
-                    c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                ws.row_dimensions[1].height = 28
+                def _pri(row):
+                    t = row["类型"]; tier = row["销量层级"]
+                    if t in ("A","B") and tier == "高": return "🔥 高"
+                    if (t in ("A","B") and tier in ("中","低")) or (t == "C" and tier == "高"): return "⚠️ 中"
+                    return "📌 低"
+                rec["优先级"] = rec.apply(_pri, axis=1)
 
-                type_idx = cols.index("类型") if "类型" in cols else -1
-                for i, row_vals in enumerate(df.values, 2):
-                    rtype = str(row_vals[type_idx]) if type_idx >= 0 else "D"
-                    fill  = fills.get(rtype, PatternFill())
-                    for j, (col, val) in enumerate(zip(cols, row_vals), 1):
-                        v = None if (isinstance(val, float) and math.isnan(val)) else val
-                        c = ws.cell(row=i, column=j, value=v)
-                        c.fill = fill
-                        c.alignment = Alignment(vertical="center", wrap_text=(col=="原因"))
-                        if col in pct_set and isinstance(v, (int,float)):
-                            c.number_format = "0.0%"
-                        elif col in price_set and isinstance(v, (int,float)):
-                            c.number_format = "#,##0.00"
+                pmap = {"🔥 高": 0, "⚠️ 中": 1, "📌 低": 2}
+                rec["_p"] = rec["优先级"].map(pmap)
+                rec = rec.sort_values(["_p", vol_c], ascending=[True, False]).drop(columns="_p")
 
-                for j, col in enumerate(cols, 1):
-                    vals = [str(col)] + [str(v) if v is not None else "" for v in df[col].values]
-                    w = max(len(s) for s in vals)
-                    ws.column_dimensions[get_column_letter(j)].width = min(w * 1.3 + 2, 50)
+                # 汇总
+                na = int((rec["类型"]=="A").sum()); nb = int((rec["类型"]=="B").sum())
+                nc = int((rec["类型"]=="C").sum()); nd = int((rec["类型"]=="D").sum())
+                c1,c2,c3,c4_ = st.columns(4)
+                c1.metric("🔴 A — 建议降核算价", na, f"影响 {int(rec[rec['类型']=='A'][vol_c].sum()):,} 单")
+                c2.metric("🟢 B — 可升核算价",   nb, f"影响 {int(rec[rec['类型']=='B'][vol_c].sum()):,} 单")
+                c3.metric("🟡 C — 全链路亏损",   nc, f"影响 {int(rec[rec['类型']=='C'][vol_c].sum()):,} 单")
+                c4_.metric("⚪ D — 定价合理",    nd)
 
-                ws2 = wb.create_sheet("分类说明")
-                legend = [("类型","建议方向","判断条件","颜色"),
-                          ("A","建议降核算价",f"总部毛利≥{hq_thr}% 且 门店毛利<{st_thr}%","红"),
-                          ("B","可升核算价",  f"总部毛利<{hq_thr}% 且 门店毛利≥{st_thr}%","绿"),
-                          ("C","全链路亏损",  f"总部毛利<{hq_thr}% 且 门店毛利<{st_thr}%","黄"),
-                          ("D","定价合理维持",f"总部毛利≥{hq_thr}% 且 门店毛利≥{st_thr}%","灰")]
-                for i,(t,b,cond,col_name) in enumerate(legend,1):
-                    for j,v in enumerate([t,b,cond,col_name],1):
-                        cell = ws2.cell(row=i,column=j,value=v)
-                        if i==1: cell.font=Font(bold=True)
-                        elif j==1: cell.fill=fills.get(t,PatternFill())
+                total_chg = rec[rec["类型"].isin(["A","B","C"])]["总部毛利额变化（元）"].sum()
+                st.info(f"按建议全部调价后，总部毛利额预计变化：**{total_chg:+,.0f} 元**（基于当前出库单量测算）")
+                st.divider()
 
-                buf = BytesIO(); wb.save(buf); buf.seek(0)
-                return buf.getvalue()
+                sel_types = st.multiselect(
+                    "筛选建议类型",
+                    ["A 降核算价","B 可升核算价","C 全链路亏损","D 定价合理"],
+                    default=["A 降核算价","B 可升核算价","C 全链路亏损"])
+                tm = {"A 降核算价":"A","B 可升核算价":"B","C 全链路亏损":"C","D 定价合理":"D"}
+                disp4 = rec[rec["类型"].isin([tm[t] for t in sel_types])].copy() if sel_types else rec.copy()
 
-            st.download_button(
-                "📥 下载定价建议（带格式 Excel）",
-                data=build_excel(disp4[show_c4], hq_thr4, st_thr4),
-                file_name=f"核算价调整建议_{hq_thr4}pct总部_{st_thr4}pct门店.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                show_c4 = [c for c in [
+                    sku_c4, brand_col, cat_col,
+                    "加权平均成本价","加权平均核算价","建议新核算价","调整幅度",
+                    "加权平均折后单价","总部毛利率","门店毛利率",
+                    vol_c,"销量层级","优先级","类型","建议","总部毛利额变化（元）","原因"
+                ] if c and c in disp4.columns]
+
+                tc = {"A":"#f8d7da","B":"#d4edda","C":"#fff3cd","D":"#e9ecef"}
+                def _cr4(row): return [f"background-color:{tc.get(row['类型'],'')};color:#1a1a1a"]*len(row)
+                fmt4 = {c:"{:.1%}" for c in ["总部毛利率","门店毛利率"] if c in show_c4}
+                fmt4.update({c:"{:.2f}" for c in ["加权平均成本价","加权平均核算价","建议新核算价","加权平均折后单价"] if c in show_c4})
+                fmt4["总部毛利额变化（元）"] = "{:+,.0f}"
+
+                st.dataframe(disp4[show_c4].style.apply(_cr4, axis=1).format(fmt4, na_rep="—"),
+                             use_container_width=True, height=480, hide_index=True)
+
+                def build_excel(df, hq_thr, st_thr):
+                    from io import BytesIO
+                    import math
+                    from openpyxl import Workbook
+                    from openpyxl.styles import PatternFill, Font, Alignment
+                    from openpyxl.utils import get_column_letter
+
+                    wb = Workbook()
+                    ws = wb.active; ws.title = "定价建议"
+                    ws.freeze_panes = "A2"
+
+                    fills = {"A": PatternFill("solid", fgColor="F8D7DA"),
+                             "B": PatternFill("solid", fgColor="D4EDDA"),
+                             "C": PatternFill("solid", fgColor="FFF3CD"),
+                             "D": PatternFill("solid", fgColor="E9ECEF")}
+                    hdr_fill  = PatternFill("solid", fgColor="2C3E50")
+                    hdr_font  = Font(bold=True, color="FFFFFF", size=10)
+                    pct_set   = {"总部毛利率","门店毛利率"}
+                    price_set = {"加权平均成本价","加权平均核算价","建议新核算价","加权平均折后单价"}
+                    profit_set= {"总部毛利额变化（元）"}
+
+                    cols = list(df.columns)
+                    for j, h in enumerate(cols, 1):
+                        cell = ws.cell(row=1, column=j, value=h)
+                        cell.fill = hdr_fill; cell.font = hdr_font
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    ws.row_dimensions[1].height = 30
+
+                    type_idx = cols.index("类型") if "类型" in cols else -1
+                    for i, row_vals in enumerate(df.values, 2):
+                        rtype = str(row_vals[type_idx]) if type_idx >= 0 else "D"
+                        fill  = fills.get(rtype, PatternFill())
+                        for j, (col, val) in enumerate(zip(cols, row_vals), 1):
+                            v = None if (isinstance(val, float) and math.isnan(val)) else val
+                            cell = ws.cell(row=i, column=j, value=v)
+                            cell.fill = fill
+                            cell.alignment = Alignment(vertical="center", wrap_text=(col in ("原因","调整幅度")))
+                            if col in pct_set and isinstance(v, (int, float)):
+                                cell.number_format = "0.0%"
+                            elif col in price_set and isinstance(v, (int, float)):
+                                cell.number_format = "#,##0.00"
+                            elif col in profit_set and isinstance(v, (int, float)):
+                                cell.number_format = '+#,##0;-#,##0;"-"'
+
+                    for j, col in enumerate(cols, 1):
+                        w = max(len(str(col)), max((len(str(v)) for v in df[col].values if v is not None), default=0))
+                        ws.column_dimensions[get_column_letter(j)].width = min(w * 1.2 + 2, 52)
+
+                    ws2 = wb.create_sheet("分类说明")
+                    legend = [
+                        ("类型","建议方向","判断条件","优先级逻辑","颜色"),
+                        ("A","建议降核算价", f"总部毛利≥{hq_thr}% 且 门店毛利<{st_thr}%",
+                         "A+高销量→🔥高；A+中低→⚠️中","红"),
+                        ("B","可升核算价",   f"总部毛利<{hq_thr}% 且 门店毛利≥{st_thr}%",
+                         "B+高销量→🔥高；B+中低→⚠️中","绿"),
+                        ("C","全链路亏损",   f"总部毛利<{hq_thr}% 且 门店毛利<{st_thr}%",
+                         "C+高销量→⚠️中；其余→📌低","黄"),
+                        ("D","定价合理维持", f"总部毛利≥{hq_thr}% 且 门店毛利≥{st_thr}%",
+                         "全部→📌低","灰"),
+                        ("","建议新核算价公式",
+                         "A类：折后单价×(1-门店基准)；B/C类：成本价÷(1-总部基准)","",""),
+                        ("","业务影响公式",
+                         "总部毛利额变化 = (新核算价-成本价 - 旧毛利额) × 出库单量","",""),
+                    ]
+                    for i, row in enumerate(legend, 1):
+                        for j, v in enumerate(row, 1):
+                            cell = ws2.cell(row=i, column=j, value=v)
+                            if i == 1: cell.font = Font(bold=True)
+                            elif j == 1 and row[0] in fills: cell.fill = fills[row[0]]
+                    for j in range(1, 6):
+                        ws2.column_dimensions[get_column_letter(j)].width = 40
+
+                    buf = BytesIO(); wb.save(buf); buf.seek(0)
+                    return buf.getvalue()
+
+                st.download_button(
+                    "📥 下载定价建议（带格式 Excel）",
+                    data=build_excel(disp4[show_c4], hq_thr4, st_thr4),
+                    file_name=f"核算价调整建议_{hq_thr4}pct总部_{st_thr4}pct门店.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
     st.stop()
 
